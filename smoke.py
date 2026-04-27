@@ -1,9 +1,11 @@
+import hmac
+import hashlib
 import json
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
-
 import requests
 
 
@@ -16,6 +18,12 @@ class Endpoints:
 
 POP_KEY = "test_pop_key_123"
 CLIENT_ID = "device_abc"
+
+
+def make_pop_proof(method: str, path: str, client_id: str, timestamp: int, nonce: str, token: str) -> str:
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    message = "|".join([method.upper(), path, client_id, str(timestamp), nonce, token_hash])
+    return hmac.new(POP_KEY.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def _request(
@@ -105,10 +113,16 @@ def auth_login(ep: Endpoints) -> Dict[str, str]:
 
 
 def resource_access(ep: Endpoints, access_token: str, client_id: str = CLIENT_ID) -> Tuple[int, str, Optional[Dict[str, Any]]]:
+    timestamp = int(time.time())
+    nonce = uuid.uuid4().hex
+    proof = make_pop_proof("GET", "/resource", client_id, timestamp, nonce, access_token)
     headers = {
         "Authorization": f"Bearer {access_token}",
         "X-POP-KEY": POP_KEY,
         "X-CLIENT-ID": client_id,
+        "X-POP-TS": str(timestamp),
+        "X-POP-NONCE": nonce,
+        "X-POP-PROOF": proof,
     }
     return _request("GET", f"{ep.resource}/resource", headers=headers)
 
