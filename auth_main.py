@@ -3,7 +3,6 @@ from __future__ import annotations
 import time
 from typing import Dict, Optional
 
-import httpx
 import jwt
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
@@ -14,7 +13,6 @@ from service_config import (
     AUTH_ISS,
     AUTH_SECRET,
     REFRESH_TTL,
-    RISK_ENGINE_URL,
 )
 from service_security import hash_client_binding
 
@@ -39,15 +37,6 @@ class TokenResponse(BaseModel):
     expires_in: int
 
 
-class RiskInput(BaseModel):
-    user_id: str
-    path: str
-    method: str
-    ip: str
-    user_agent: str
-    timestamp: float
-
-
 async def get_pop_key(x_pop_key: Optional[str] = Header(None)) -> str:
     if not x_pop_key:
         raise HTTPException(status_code=400, detail="X-POP-KEY header is required")
@@ -60,26 +49,9 @@ async def get_client_id(x_client_id: Optional[str] = Header(None)) -> str:
     return x_client_id
 
 
-async def call_risk_engine(user_id: str) -> str:
-    payload = RiskInput(
-        user_id=user_id,
-        path="/auth/token",
-        method="POST",
-        ip="127.0.0.1",
-        user_agent="auth-service",
-        timestamp=time.time(),
-    )
-    async with httpx.AsyncClient() as client:
-        response = await client.post(RISK_ENGINE_URL, json=payload.model_dump())
-    if response.status_code != 200:
-        raise HTTPException(status_code=500, detail="Risk service is unavailable")
-    return response.json()["src"]
-
-
 async def issue_tokens(username: str, pop_key: str, client_id: str) -> TokenResponse:
     now = int(time.time())
     bound = hash_client_binding(pop_key, client_id)
-    src = await call_risk_engine(user_id=username)
 
     access_payload = {
         "iss": AUTH_ISS,
@@ -88,7 +60,6 @@ async def issue_tokens(username: str, pop_key: str, client_id: str) -> TokenResp
         "exp": now + ACCESS_TTL,
         "typ": "access",
         "bound": bound,
-        "src": src,
     }
     access_token = jwt.encode(access_payload, AUTH_SECRET, algorithm=AUTH_ALG)
 

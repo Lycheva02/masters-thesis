@@ -3,8 +3,9 @@ from __future__ import annotations
 import time
 from typing import Optional
 
+import httpx
 import jwt
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from service_config import (
@@ -15,6 +16,7 @@ from service_config import (
     RISK_ALG,
     RISK_ISS,
     RISK_SECRET,
+    RISK_ENGINE_URL,
     SRC_TTL,
 )
 from service_security import hash_client_binding
@@ -26,6 +28,15 @@ class ResourceResponse(BaseModel):
     message: str
     user: str
     rho: float
+
+
+class RiskInput(BaseModel):
+    user_id: str
+    path: str
+    method: str
+    ip: Optional[str] = None
+    user_agent: Optional[str] = None
+    timestamp: Optional[float] = None
 
 
 async def get_authorization(authorization: Optional[str] = Header(None)) -> str:
@@ -67,8 +78,31 @@ def verify_src(src_token: str, expected_user: str) -> float:
     return float(rho)
 
 
+async def call_risk_engine(user_id: str, request: Request) -> float:
+    payload = RiskInput(
+        user_id=user_id,
+        path=request.url.path,
+        method=request.method,
+        ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        timestamp=time.time(),
+    )
+    async with httpx.AsyncClient() as client:
+        response = await client.post(RISK_ENGINE_URL, json=payload.model_dump())
+
+    if response.status_code != 200:
+        raise HTTPException(status_code=500, detail="Risk service is unavailable")
+
+    src_token = response.json().get("src")
+    if not src_token:
+        raise HTTPException(status_code=500, detail="Risk service returned no risk token")
+
+    return verify_src(src_token, expected_user=user_id)
+
+
 @app.get("/resource", response_model=ResourceResponse)
 async def protected_resource(
+    request: Request,
     token: str = Depends(get_authorization),
     pop_key: str = Depends(get_pop_key),
     client_id: str = Depends(get_client_id),
@@ -95,11 +129,7 @@ async def protected_resource(
     if expected_bound != bound:
         raise HTTPException(status_code=401, detail="Client binding mismatch")
 
-    src_token = payload.get("src")
-    if not src_token:
-        raise HTTPException(status_code=401, detail="Risk token is missing")
-
-    rho = verify_src(src_token, expected_user=user)
+    rho = await call_risk_engine(user_id=user, request=request)
     if rho < RHO_MIN:
         raise HTTPException(status_code=403, detail=f"rho is below the threshold ({rho:.2f})")
 
