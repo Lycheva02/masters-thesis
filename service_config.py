@@ -1,6 +1,7 @@
 AUTH_SECRET = "change_this_auth_secret"
 AUTH_ISS = "auth-service"
 AUTH_ALG = "HS256"
+AUTH_INTROSPECT_URL = "http://localhost:8001/auth/introspect"
 
 RISK_SECRET = "change_this_risk_secret"
 RISK_ISS = "risk-engine"

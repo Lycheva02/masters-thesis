@@ -4,14 +4,11 @@ import time
 from typing import Optional
 
 import httpx
-import jwt
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from service_config import (
-    AUTH_ALG,
-    AUTH_ISS,
-    AUTH_SECRET,
+    AUTH_INTROSPECT_URL,
     POP_NONCE_TTL,
     POP_PROOF_TTL,
     RHO_MIN,
@@ -40,6 +37,16 @@ class RiskInput(BaseModel):
     ip: Optional[str] = None
     user_agent: Optional[str] = None
     timestamp: Optional[float] = None
+
+
+class IntrospectRequest(BaseModel):
+    access_token: str
+
+
+class IntrospectResponse(BaseModel):
+    active: bool
+    sub: Optional[str] = None
+    bound: Optional[str] = None
 
 
 async def get_authorization(authorization: Optional[str] = Header(None)) -> str:
@@ -148,6 +155,21 @@ def verify_request_proof(
     register_nonce(user, pop_nonce, now)
 
 
+async def introspect_access_token(token: str) -> IntrospectResponse:
+    payload = IntrospectRequest(access_token=token)
+    async with httpx.AsyncClient() as client:
+        response = await client.post(AUTH_INTROSPECT_URL, json=payload.model_dump())
+
+    if response.status_code != 200:
+        raise HTTPException(status_code=500, detail="Auth service is unavailable")
+
+    data = IntrospectResponse.model_validate(response.json())
+    if not data.active or not data.sub or not data.bound:
+        raise HTTPException(status_code=401, detail="Access token is invalid")
+
+    return data
+
+
 async def call_risk_engine(user_id: str, request: Request) -> float:
     payload = RiskInput(
         user_id=user_id,
@@ -180,23 +202,9 @@ async def protected_resource(
     pop_nonce: str = Depends(get_pop_nonce),
     pop_proof: str = Depends(get_pop_proof),
 ) -> ResourceResponse:
-    try:
-        payload = jwt.decode(token, AUTH_SECRET, algorithms=[AUTH_ALG])
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Access token has expired")
-    except jwt.PyJWTError:
-        raise HTTPException(status_code=401, detail="Access token is invalid")
-
-    if payload.get("iss") != AUTH_ISS or payload.get("typ") != "access":
-        raise HTTPException(status_code=401, detail="Wrong token issuer or type")
-
-    user = payload.get("sub")
-    if not user:
-        raise HTTPException(status_code=401, detail="Token subject is missing")
-
-    bound = payload.get("bound")
-    if not bound:
-        raise HTTPException(status_code=401, detail="Token binding is missing")
+    token_info = await introspect_access_token(token)
+    user = token_info.sub
+    bound = token_info.bound
 
     expected_bound = hash_client_binding(pop_key, client_id)
     if expected_bound != bound:

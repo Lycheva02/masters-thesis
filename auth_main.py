@@ -37,6 +37,16 @@ class TokenResponse(BaseModel):
     expires_in: int
 
 
+class IntrospectRequest(BaseModel):
+    access_token: str
+
+
+class IntrospectResponse(BaseModel):
+    active: bool
+    sub: Optional[str] = None
+    bound: Optional[str] = None
+
+
 async def get_pop_key(x_pop_key: Optional[str] = Header(None)) -> str:
     if not x_pop_key:
         raise HTTPException(status_code=400, detail="X-POP-KEY header is required")
@@ -141,3 +151,21 @@ async def refresh(
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/auth/introspect", response_model=IntrospectResponse)
+async def introspect(body: IntrospectRequest) -> IntrospectResponse:
+    try:
+        payload = jwt.decode(body.access_token, AUTH_SECRET, algorithms=[AUTH_ALG])
+    except jwt.PyJWTError:
+        return IntrospectResponse(active=False)
+
+    if payload.get("iss") != AUTH_ISS or payload.get("typ") != "access":
+        return IntrospectResponse(active=False)
+
+    sub = payload.get("sub")
+    bound = payload.get("bound")
+    if not sub or not bound:
+        return IntrospectResponse(active=False)
+
+    return IntrospectResponse(active=True, sub=sub, bound=bound)
